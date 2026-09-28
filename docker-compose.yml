@@ -1,0 +1,131 @@
+# Two independent 4-validator QBFT networks.
+#
+#   chain-a  chainId 20001  subnet 172.28.1.0/24  HTTP 8545-8548  WS 8645-8648
+#   chain-b  chainId 20002  subnet 172.28.2.0/24  HTTP 9545-9548  WS 9645-9648
+#
+# Run scripts/generate.sh first to create networks/ (genesis, keys, static-nodes).
+# Each chain lives on its own docker network and only knows its own peers.
+
+x-besu: &besu
+  image: ${BESU_IMAGE:-hyperledger/besu:25.8.0}
+  # Run as the image's besu user so the root entrypoint doesn't chown our
+  # read-only key mounts. Chain data lives in the container layer: it
+  # survives stop/start/kill (for quorum tests) and is wiped by `down`.
+  user: besu
+  restart: "no"
+  command:
+    - --data-path=/opt/besu/data
+    - --genesis-file=/config/genesis.json
+    - --node-private-key-file=/config/node/key
+    - --static-nodes-file=/config/static-nodes.json
+    - --discovery-enabled=false
+    - --p2p-port=30303
+    - --min-gas-price=0
+    - --rpc-http-enabled
+    - --rpc-http-host=0.0.0.0
+    - --rpc-http-port=8545
+    - --rpc-http-api=ETH,NET,WEB3,QBFT,ADMIN
+    - --rpc-http-cors-origins=*
+    - --rpc-ws-enabled
+    - --rpc-ws-host=0.0.0.0
+    - --rpc-ws-port=8546
+    - --rpc-ws-api=ETH,NET,WEB3,QBFT,ADMIN
+    - --host-allowlist=*
+    - --logging=INFO
+
+services:
+  # ---------------------------------------------------------------- chain-a
+  a-validator1:
+    <<: *besu
+    container_name: a-validator1
+    environment: { BESU_P2P_HOST: 172.28.1.11 }
+    networks: { chain-a: { ipv4_address: 172.28.1.11 } }
+    ports: ["127.0.0.1:8545:8545", "127.0.0.1:8645:8546"]
+    volumes:
+      - ./networks/chain-a/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-a/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-a/validator1:/config/node:ro,z
+
+  a-validator2:
+    <<: *besu
+    container_name: a-validator2
+    environment: { BESU_P2P_HOST: 172.28.1.12 }
+    networks: { chain-a: { ipv4_address: 172.28.1.12 } }
+    ports: ["127.0.0.1:8546:8545", "127.0.0.1:8646:8546"]
+    volumes:
+      - ./networks/chain-a/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-a/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-a/validator2:/config/node:ro,z
+
+  a-validator3:
+    <<: *besu
+    container_name: a-validator3
+    environment: { BESU_P2P_HOST: 172.28.1.13 }
+    networks: { chain-a: { ipv4_address: 172.28.1.13 } }
+    ports: ["127.0.0.1:8547:8545", "127.0.0.1:8647:8546"]
+    volumes:
+      - ./networks/chain-a/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-a/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-a/validator3:/config/node:ro,z
+
+  a-validator4:
+    <<: *besu
+    container_name: a-validator4
+    environment: { BESU_P2P_HOST: 172.28.1.14 }
+    networks: { chain-a: { ipv4_address: 172.28.1.14 } }
+    ports: ["127.0.0.1:8548:8545", "127.0.0.1:8648:8546"]
+    volumes:
+      - ./networks/chain-a/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-a/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-a/validator4:/config/node:ro,z
+
+  # ---------------------------------------------------------------- chain-b
+  b-validator1:
+    <<: *besu
+    container_name: b-validator1
+    environment: { BESU_P2P_HOST: 172.28.2.11 }
+    networks: { chain-b: { ipv4_address: 172.28.2.11 } }
+    ports: ["127.0.0.1:9545:8545", "127.0.0.1:9645:8546"]
+    volumes:
+      - ./networks/chain-b/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-b/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-b/validator1:/config/node:ro,z
+
+  b-validator2:
+    <<: *besu
+    container_name: b-validator2
+    environment: { BESU_P2P_HOST: 172.28.2.12 }
+    networks: { chain-b: { ipv4_address: 172.28.2.12 } }
+    ports: ["127.0.0.1:9546:8545", "127.0.0.1:9646:8546"]
+    volumes:
+      - ./networks/chain-b/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-b/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-b/validator2:/config/node:ro,z
+
+  b-validator3:
+    <<: *besu
+    container_name: b-validator3
+    environment: { BESU_P2P_HOST: 172.28.2.13 }
+    networks: { chain-b: { ipv4_address: 172.28.2.13 } }
+    ports: ["127.0.0.1:9547:8545", "127.0.0.1:9647:8546"]
+    volumes:
+      - ./networks/chain-b/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-b/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-b/validator3:/config/node:ro,z
+
+  b-validator4:
+    <<: *besu
+    container_name: b-validator4
+    environment: { BESU_P2P_HOST: 172.28.2.14 }
+    networks: { chain-b: { ipv4_address: 172.28.2.14 } }
+    ports: ["127.0.0.1:9548:8545", "127.0.0.1:9648:8546"]
+    volumes:
+      - ./networks/chain-b/genesis.json:/config/genesis.json:ro,z
+      - ./networks/chain-b/static-nodes.json:/config/static-nodes.json:ro,z
+      - ./networks/chain-b/validator4:/config/node:ro,z
+
+networks:
+  chain-a:
+    ipam: { config: [{ subnet: 172.28.1.0/24 }] }
+  chain-b:
+    ipam: { config: [{ subnet: 172.28.2.0/24 }] }

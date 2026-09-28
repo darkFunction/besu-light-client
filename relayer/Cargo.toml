@@ -1,0 +1,11 @@
+[package]
+name = "relayer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alloy = { version = "2.5.0", features = ["provider-http", "rpc-types", "consensus", "rlp"] }
+alloy-rlp = { version = "0.3.16", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+
+
