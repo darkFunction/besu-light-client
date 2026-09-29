@@ -46,9 +46,18 @@ contract Bridge is IMessageReceiver {
         address sender,
         bytes memory payload
     ) external {
-        require(msg.sender == INBOX);
-        require(sender == REMOTE_BRIDGE);
-        require(remoteChainId == REMOTE_CHAIN_ID);
+        require(
+            msg.sender == INBOX,
+            "Only transactions from the Inbox contract are allowed."
+        );
+        require(
+            sender == REMOTE_BRIDGE,
+            "Only messages from the remote bridge are allowed."
+        );
+        require(
+            remoteChainId == REMOTE_CHAIN_ID,
+            "Only message from the remote chain ID are allowed."
+        );
 
         (address account, uint256 amount) = abi.decode(
             payload,

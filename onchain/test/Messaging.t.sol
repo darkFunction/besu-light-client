@@ -295,7 +295,7 @@ contract MessagingTest is InboxTestBase {
 
         vm.recordLogs();
         vm.prank(sourceApp);
-        outbox.send(destinationChainId, target, data);
+        outbox.sendMessage(destinationChainId, target, data);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         vm.chainId(previousChainId);
