@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.15;
+
 import {RLPReader} from "optimism-bedrock-contracts/rlp/RLPReader.sol";
 import {RLPWriter} from "optimism-bedrock-contracts/rlp/RLPWriter.sol";
 import {MerkleTrie} from "optimism-bedrock-contracts/trie/MerkleTrie.sol";
 import {Bytes} from "optimism-bedrock-contracts/Bytes.sol";
+import "./IOutbox.sol";
+
+interface IMessageReceiver {
+    function handleInboxMessage(
+        uint256 sourceChainId,
+        address sender,
+        bytes memory payload
+    ) external;
+}
 
 contract Inbox {
     event BlockSubmitted(uint256);
@@ -14,18 +24,19 @@ contract Inbox {
         uint8 v;
     }
 
-    address public immutable SOURCE_BRIDGE;
+    address public immutable OUTBOX;
 
     address[] public validators;
+
     mapping(address => bool) private _isValidator;
-
     mapping(uint256 => bytes32) private _receiptsRoots;
+    mapping(bytes32 => bool) private _delivered;
 
-    constructor(address[] memory initialValidators, address sourceBridge) {
+    constructor(address[] memory initialValidators, address outbox) {
         require(initialValidators.length > 0);
-        require(sourceBridge != address(0));
+        require(outbox != address(0));
 
-        SOURCE_BRIDGE = sourceBridge;
+        OUTBOX = outbox;
 
         validators = initialValidators;
         for (uint256 i = 0; i < initialValidators.length; i++) {
@@ -87,6 +98,13 @@ contract Inbox {
         bytes32 root = _receiptsRoots[blockNumber];
         require(root != bytes32(0), "Header not submitted");
 
+        // Replay protection
+        bytes32 messageId = keccak256(
+            abi.encode(blockNumber, txIndex, logIndex)
+        );
+        require(!_delivered[messageId], "Already delivered");
+        _delivered[messageId] = true;
+
         bytes memory key = RLPWriter.writeUint(txIndex);
         bytes memory receipt = MerkleTrie.get(key, proof, root);
 
@@ -96,8 +114,23 @@ contract Inbox {
             bytes memory data
         ) = _readLog(receipt, logIndex);
 
-        require(emitter == SOURCE_BRIDGE);
-        // TODO
+        require(emitter == OUTBOX, "Event not posted from the outbox");
+        require(
+            topics[0] == IOutbox.Message.selector,
+            "The event is not a valid outbox message"
+        );
+
+        IOutbox.Envelope memory envelope = abi.decode(data, (IOutbox.Envelope));
+        require(
+            envelope.destinationChainId == block.chainid,
+            "Delivered to incorrect destination chain"
+        );
+
+        IMessageReceiver(envelope.target).handleInboxMessage(
+            envelope.sourceChainId,
+            envelope.sender,
+            envelope.payload
+        );
     }
 
     function _readLog(
