@@ -78,7 +78,7 @@ contract Inbox {
         emit BlockSubmitted(number);
     }
 
-    function validateEvent(
+    function deliver(
         uint256 blockNumber,
         uint256 txIndex,
         bytes[] calldata proof,

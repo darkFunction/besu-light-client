@@ -1,80 +1,97 @@
-# Local QBFT test networks
+# Besu QBFT light client
 
-Two independent Hyperledger Besu QBFT chains, 4 validators each, in one `docker-compose.yml`.
+A trust-minimised bridge between two Hyperledger Besu QBFT chains. The destination chain verifies source-chain block
+headers on-chain by checking that ≥2/3 of the known validator set sealed them. Once it trusts a header, it can verify
+Merkle proofs of receipts, and therefore event logs, against that header's `receiptsRoot`. The relayer only moves data
+between the chains; the contracts verify everything themselves.
 
-| | chain-a | chain-b |
-|---|---|---|
-| chainId | 20001 | 20002 |
-| HTTP RPC (validator1-4) | `localhost:8545-8548` | `localhost:9545-9548` |
-| WS RPC (validator1-4) | `localhost:8645-8648` | `localhost:9645-9648` |
-| docker subnet | 172.28.1.0/24 | 172.28.2.0/24 |
+## Layout
 
-- Block period 2s (`qbft.blockperiodseconds` in `config/chain-*/qbftConfigFile.json`)
-- Zero gas: `--min-gas-price=0` plus `zeroBaseFee: true` in genesis (London+ with baseFee 0)
-- RPC APIs: `ETH,NET,WEB3,QBFT,ADMIN` (HTTP and WS). Ports bind to 127.0.0.1 only since ADMIN is exposed.
-- Besu `25.8.0` (override with `BESU_IMAGE=...`)
+| Path                                        | What                                                                                |
+| ------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `docker-compose.yml`, `config/`, `scripts/` | Two local 4-validator QBFT chains                                                   |
+| `relayer/`                                  | Rust (alloy): reads source-chain headers and submits them to the destination        |
+| `onchain/`                                  | Foundry: `Inbox` (light client and message delivery) and `Outbox` (message emitter) |
 
-## Usage
+## Status
+
+**Relayer**: fetches the latest chain-a header, decodes the QBFT `extraData`
+(`[vanity, validators, vote, round, seals]`) and rebuilds the header RLP with an empty seal list, which is the payload
+the validators signed. It then splits each seal into `r`, `s` and `v` (`+27` for `ecrecover`), sorts the seals by
+recovered signer, and calls `Inbox.postConsensus` on chain-b. It submits one block per run.
+
+**`Inbox`** (destination):
+
+- The validator set is fixed at deployment (there's no rotation yet).
+- `postConsensus(header, seals)` recovers the signers from `keccak256(header)` and requires strictly increasing,
+  known signers reaching a quorum of `ceil(2n/3)`. It parses `number` and `receiptsRoot` from the same bytes it hashed,
+  stores the root and emits `BlockSubmitted`. Headers can be submitted sparsely and in any order, since QBFT blocks
+  are final immediately.
+- `deliver(blockNumber, txIndex, proof, logIndex)` (in progress) verifies a receipt against the stored root with
+  `MerkleTrie.get(rlp(txIndex), proof, root)`, decodes the receipt (removing the EIP-2718 type byte) and reads the
+  selected log.
+
+**`Outbox`** (source): `send(destinationChainId, target, payload)` emits a `Message` event stamped with
+`block.chainid` and `msg.sender`, so receivers can tell which source contract sent it.
+
+**Tests**: `onchain/test/` uses synthetic headers signed with Foundry keys to cover the quorum threshold,
+unsorted, duplicate, unknown and malformed seals, tampered headers and out-of-order submission.
+
+Dependencies: RLP and trie verification come from
+[succinctlabs/optimism-bedrock-contracts](https://github.com/succinctlabs/optimism-bedrock-contracts) (a git submodule).
+
+## Running
 
 ```sh
-scripts/generate.sh          # genesis + keys via `besu operator generate-blockchain-config`
+scripts/generate.sh                  # genesis and validator keys into networks/ (git-ignored)
 docker-compose up -d
-scripts/status.sh            # chainId / head / peers / validator set per node
-docker-compose down          # wipes chain data (keys/genesis in networks/ are kept)
+scripts/status.sh                    # chainId, head, peers and validator set per node
+
+cd onchain && forge test
+cd relayer && cargo run              # relay the latest chain-a header to chain-b
 ```
 
-`scripts/generate.sh --force` regenerates everything **with new keys** (new validator addresses).
+To clone: `git clone --recursive`, or run `git submodule update --init` afterwards.
 
-Layout after generation:
+## Networks
 
-```
-networks/chain-<x>/genesis.json
-networks/chain-<x>/static-nodes.json      # all 4 validators; nodes peer via static nodes, discovery off
-networks/chain-<x>/validator<N>/{key,key.pub,address}
-```
+|                           | chain-a (source)      | chain-b (destination) |
+| ------------------------- | --------------------- | --------------------- |
+| chainId                   | 20001                 | 20002                 |
+| HTTP RPC (validators 1–4) | `localhost:8545-8548` | `localhost:9545-9548` |
+| WS RPC                    | `localhost:8645-8648` | `localhost:9645-9648` |
 
-## Funded account
+- Besu `25.8.0`, 2s blocks, London and Shanghai active from genesis, zero gas (`--min-gas-price=0`, `zeroBaseFee`)
+- RPC APIs: `ETH,NET,WEB3,QBFT,ADMIN`, bound to 127.0.0.1 only
+- Validator selection is header-based, so the validator list lives in `extraData`
+- Bonsai storage keeps about 512 blocks of state. Use `--data-storage-format=FOREST` if you need old-block `eth_getProof`
+- `docker-compose down` wipes chain data. `stop` and `start` keep it. `generate.sh --force` creates **new** validator keys
 
-Both genesis files prefund the well-known Besu dev account (it doesn't strictly need funds with zero gas, but value transfers do):
+Both chains prefund the well-known Besu dev account (local use only):
 
 ```
 address 0xfe3b557e8fb62b89f4916b721be55ceb828dbd73
 key     0x8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63
 ```
 
-```sh
-cast send --rpc-url http://127.0.0.1:8545 --private-key $KEY --gas-price 0 --legacy <to> --value 1ether
-```
+Transactions need `--legacy --gas-price 0` with `cast`/`forge`.
 
-## Test recipes
+### Recipes
 
-**Quorum** (4 validators, f=1, quorum 3):
 ```sh
-docker-compose stop a-validator4                 # chain-a keeps producing (slower on v4's proposer turns)
-docker-compose stop a-validator3                 # chain-a halts
-docker-compose start a-validator3 a-validator4   # resumes; can take ~30-60s because round timers back off exponentially while halted
-```
-Chain data lives in the container layer, so `stop`/`start`/`kill` keep state; `down` wipes it.
+# Quorum: 4 validators tolerate 1 fault
+docker-compose stop a-validator4                  # chain-a keeps producing
+docker-compose stop a-validator3                  # chain-a halts
+docker-compose start a-validator3 a-validator4    # resumes after 30–60s (round timers back off)
 
-**Validator rotation** (majority of current validators must vote):
-```sh
+# Validator rotation: a majority must vote. Repeat on :8546 and :8547,
+# then call qbft_discardValidatorVote on each node, or they keep voting
 curl -s localhost:8545 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"qbft_proposeValidatorVote","params":["<address>", false]}'
-# repeat on :8546 and :8547, then check qbft_getValidatorsByBlockNumber ["latest"]
-# afterwards: qbft_discardValidatorVote ["<address>"] on each node, or they keep re-voting
-```
 
-**Replay protection**: a tx signed for chain-a submitted to chain-b is rejected with `Wrong chainId`.
-
-**Runtime log level** (via ADMIN API):
-```sh
+# Consensus debug logging
 curl -s localhost:8545 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"admin_changeLogLevel","params":["DEBUG",["org.hyperledger.besu.consensus"]]}'
 ```
 
-## Notes
-
-- SELinux (Fedora): bind mounts use `:z`; the generator does too.
-- Containers run as the image's `besu` user so the root entrypoint doesn't try to chown the read-only key mounts.
-- Storage is Besu's default Bonsai, which only keeps recent world state (~512 blocks). If you need `eth_getProof` / state
-  queries at old blocks, add `--data-storage-format=FOREST` to the `x-besu` command list.
+SELinux (Fedora): the bind mounts use `:z`, and containers run as the image's `besu` user.
