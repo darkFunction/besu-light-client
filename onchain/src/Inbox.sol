@@ -6,14 +6,7 @@ import {RLPWriter} from "optimism-bedrock-contracts/rlp/RLPWriter.sol";
 import {MerkleTrie} from "optimism-bedrock-contracts/trie/MerkleTrie.sol";
 import {Bytes} from "optimism-bedrock-contracts/Bytes.sol";
 import "./IOutbox.sol";
-
-interface IMessageReceiver {
-    function handleInboxMessage(
-        uint256 sourceChainId,
-        address sender,
-        bytes memory payload
-    ) external;
-}
+import "./IMessageReceiver.sol";
 
 contract Inbox {
     event BlockSubmitted(uint256);
