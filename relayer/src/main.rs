@@ -1,5 +1,6 @@
 use std::collections;
 
+use alloy::eips::{BlockId, eip2718::Encodable2718};
 use alloy::network::ReceiptResponse;
 use alloy::primitives::{Address, B256, Bytes, Signature, keccak256};
 use alloy::providers::{Provider, ProviderBuilder};
@@ -7,6 +8,7 @@ use alloy::rpc::types::TransactionReceipt;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::transports::http::reqwest::Url;
+use alloy::trie::root::ordered_trie_root_encoded;
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 
 #[derive(Debug, Clone, RlpEncodable, RlpDecodable)]
