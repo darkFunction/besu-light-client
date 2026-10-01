@@ -44,6 +44,7 @@ contract Inbox {
         return validators;
     }
 
+    // TODO: inbox shouldn't really handle light client duties, move to a new contract
     function postConsensus(
         bytes calldata header,
         Seal[] calldata seals
