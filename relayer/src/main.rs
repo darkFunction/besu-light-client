@@ -4,6 +4,7 @@ use alloy::rpc::types::{Filter, TransactionReceipt};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolEvent;
+use alloy::trie::{HashBuilder, Nibbles, proof::ProofRetainer, root::adjust_index_for_rlp};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use futures::StreamExt;
 use serde::Deserialize;
@@ -110,6 +111,11 @@ async fn main() {
 
         // TODO:
         // - calculate merkle proof for message and post to inbox of target chain
+        // ie, show that the log was inside the receiptRoot we've posted
+        // the proof contains the receipt of the log-emitting transaction,
+        // which contains the logs of the transaction, which we select with
+        // log_index. the log contains the emitter, the topics, and the data which
+        // is the abi encoded envelope
     }
 }
 
