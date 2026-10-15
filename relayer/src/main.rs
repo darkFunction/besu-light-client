@@ -1,8 +1,13 @@
-use alloy::primitives::{Address, B256, Bytes, Signature, keccak256};
+mod solidity_types;
+use crate::solidity_types::LightClient::LightClientInstance;
+use crate::solidity_types::{LightClient, Message};
+use alloy::consensus::{Block, BlockHeader};
+use alloy::eips::BlockNumberOrTag;
+use alloy::eips::eip2718::Encodable2718;
+use alloy::primitives::{Address, B256, Bytes, Signature, U256, keccak256};
 use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::rpc::types::{Filter, TransactionReceipt};
 use alloy::signers::local::PrivateKeySigner;
-use alloy::sol;
 use alloy::sol_types::SolEvent;
 use alloy::trie::{HashBuilder, Nibbles, proof::ProofRetainer, root::adjust_index_for_rlp};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
@@ -41,30 +46,6 @@ struct HeaderSubmission {
     seals: Vec<LightClient::Seal>,
 }
 
-sol! {
-    #[sol(rpc)]
-    contract LightClient {
-        struct Seal {
-            bytes32 r;
-            bytes32 s;
-            uint8 v;
-        }
-        function postConsensus(bytes header, Seal[] seals) external;
-        function validators(uint256 index) external view returns (address);
-    }
-}
-
-sol! {
-    struct Envelope {
-        uint256 sourceChainId;
-        address sender;
-        uint256 destinationChainId;
-        address target;
-        bytes payload;
-    }
-    event Message(Envelope envelope);
-}
-
 const CHAIN_A_WS: &str = "ws://127.0.0.1:8645";
 const CHAIN_B_WS: &str = "ws://127.0.0.1:9645";
 const PRIVATE_KEY: &str = "8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"; // Well-known Besu test key, do not use in production
@@ -87,6 +68,8 @@ async fn main() {
         .await
         .unwrap();
 
+    let client = LightClient::new(deployments.chain_a.inbox, &chain_b_provider);
+
     let filter = Filter::new()
         .address(deployments.chain_a.outbox)
         .event_signature(Message::SIGNATURE_HASH);
@@ -96,35 +79,75 @@ async fn main() {
 
     while let Some(log) = stream.next().await {
         let block_number = log.block_number.unwrap();
+
+        let block = chain_a_provider
+            .get_block_by_number(block_number.into())
+            .await
+            .unwrap()
+            .unwrap();
+
         let block_header = read_block_header(
+            &block.header,
             &chain_a_provider,
             Some(alloy::eips::BlockNumberOrTag::Number(block_number)),
         )
         .await;
 
-        let tx_receipt =
-            submit_block_header(&chain_b_provider, deployments.chain_b.inbox, block_header).await;
+        let tx_receipt = submit_block_header(&client, block_header).await;
         if tx_receipt.inner.status() {
             println!("Consensus pushed for block {block_number}");
         }
-        //println!("{tx_receipt:#?}");
 
-        // TODO:
-        // - calculate merkle proof for message and post to inbox of target chain
-        // ie, show that the log was inside the receiptRoot we've posted
-        // the proof contains the receipt of the log-emitting transaction,
-        // which contains the logs of the transaction, which we select with
-        // log_index. the log contains the emitter, the topics, and the data which
-        // is the abi encoded envelope
+        let block_log_index = log.log_index.unwrap();
+        let tx_index = log.transaction_index.unwrap() as usize;
+
+        let receipts = chain_a_provider
+            .get_block_receipts(block_number.into())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (proof, log_index) = receipt_proof(
+            &receipts,
+            block.header.receipts_root,
+            tx_index,
+            block_log_index,
+        );
+
+        let deliver_receipt = deliver_message(&client, block_number, tx_index, proof, log_index);
+        match tx_receipt.inner.status() {
+            true => println!("Submitted outbox msg to inbox!"),
+            false => println!("Submission failed"),
+        }
     }
 }
 
+async fn deliver_message<P: Provider>(
+    client: &LightClientInstance<P>,
+    block_number: u64,
+    tx_index: usize,
+    proof: Vec<Bytes>,
+    log_index: u64,
+) -> TransactionReceipt {
+    client
+        .deliver(
+            U256::from(block_number),
+            U256::from(tx_index),
+            proof,
+            U256::from(log_index),
+        )
+        .send()
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap()
+}
+
 async fn submit_block_header<P: Provider>(
-    provider: &P,
-    contract_address: Address,
+    client: &LightClientInstance<P>,
     submission: HeaderSubmission,
 ) -> TransactionReceipt {
-    let client = LightClient::new(contract_address, &provider);
     client
         .postConsensus(submission.header_rlp.into(), submission.seals)
         .send()
@@ -136,15 +159,10 @@ async fn submit_block_header<P: Provider>(
 }
 
 async fn read_block_header<P: Provider>(
+    header: &alloy::rpc::types::Header,
     provider: &P,
     block_number: Option<alloy::eips::BlockNumberOrTag>,
 ) -> HeaderSubmission {
-    let block = provider
-        .get_block_by_number(block_number.unwrap_or(alloy::eips::BlockNumberOrTag::Latest))
-        .await
-        .unwrap();
-
-    let header = block.unwrap().header;
     let extra: QbftExtraData = alloy::rlp::decode_exact(&header.extra_data).unwrap();
 
     let mut stripped_extra = extra.clone();
@@ -180,4 +198,55 @@ async fn read_block_header<P: Provider>(
         header_rlp: encoded_stripped_header,
         seals: ordered_seals,
     };
+}
+
+/// Builds the receipts trie of a block and returns the Merkle proof for the receipt at `tx_index`,
+/// plus the position of `block_log_index` within that receipt's own log list.
+/// Panics if the rebuilt root doesn't match the header's `receiptsRoot`.
+fn receipt_proof(
+    receipts: &[TransactionReceipt],
+    receipts_root: B256,
+    tx_index: usize,
+    block_log_index: u64,
+) -> (Vec<Bytes>, u64) {
+    // The trie values: EIP-2718 encoding of each receipt (type byte + rlp for typed receipts)
+    let encoded: Vec<Vec<u8>> = receipts
+        .iter()
+        .map(|r| r.inner.clone().map_logs(|l| l.inner).encoded_2718())
+        .collect();
+
+    // The trie keys: rlp(index). Leaves must be inserted in sorted key order, which is
+    // what adjust_index_for_rlp gives us (same as alloy's ordered_trie_root)
+    let key = |index: usize| Nibbles::unpack(alloy_rlp::encode_fixed_size(&index));
+    let target = key(tx_index);
+
+    let mut hb =
+        HashBuilder::default().with_proof_retainer(ProofRetainer::new(vec![target.clone()]));
+    for i in 0..encoded.len() {
+        let index = adjust_index_for_rlp(i, encoded.len());
+        hb.add_leaf(key(index), &encoded[index]);
+    }
+
+    let root = hb.root();
+    assert_eq!(
+        root, receipts_root,
+        "rebuilt receipts trie doesn't match header"
+    );
+
+    let proof: Vec<Bytes> = hb
+        .take_proof_nodes()
+        .matching_nodes_sorted(&target)
+        .into_iter()
+        .map(|(_, node)| node)
+        .collect();
+
+    // RPC log_index is block-wide; the contract needs the position within the receipt
+    let first_in_receipt = receipts[tx_index]
+        .inner
+        .logs()
+        .first()
+        .and_then(|l| l.log_index)
+        .expect("receipt has no logs");
+
+    (proof, block_log_index - first_in_receipt)
 }
